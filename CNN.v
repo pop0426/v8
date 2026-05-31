@@ -167,11 +167,7 @@ wire [31:0] dot_word1_c = (state == S_ROW_XCAP) ? doutb : 32'd0;
 wire signed [7:0] dot_pix0_c = get_window_byte(dot_word0_c, dot_word1_c, read_byte_sel_q, 2'd0);
 wire signed [7:0] dot_pix1_c = get_window_byte(dot_word0_c, dot_word1_c, read_byte_sel_q, 2'd1);
 wire signed [7:0] dot_pix2_c = get_window_byte(dot_word0_c, dot_word1_c, read_byte_sel_q, 2'd2);
-wire signed [ACC_W-1:0] prod0_c = mul_q(dot_pix0_c, row_w0_c);
-wire signed [ACC_W-1:0] prod1_c = mul_q(dot_pix1_c, row_w1_c);
-wire signed [ACC_W-1:0] prod2_c = mul_q(dot_pix2_c, row_w2_c);
 wire signed [ACC_W-1:0] prod_sum_q = prod0_q + prod1_q + prod2_q;
-wire signed [ACC_W-1:0] final_acc_c = prod_valid_q ? (acc + prod_sum_q) : acc;
 wire [9:0] next_top_row_base = row_base + {4'd0, in_size};
 wire [9:0] next_bottom_load_base = row_base + {4'd0, in_size} + {3'd0, in_size, 1'b0};
 wire [1:0] next_bottom_load_sel = next_bottom_load_base[1:0];
@@ -211,7 +207,6 @@ wire signed [7:0] slide22_c = get_buf2_byte(col + 6'd3);
 wire signed [ACC_W-1:0] conv_acc_c = sum0_q + sum1_q + sum2_q;
 wire signed [7:0] conv_result_c = quantize_q12(conv_acc_c);
 wire [31:0] pack_next = put_byte(pack_word, elem_idx[1:0], result_q);
-wire [31:0] pipe_pack_next = put_byte(pack_word, sum_elem_idx_q[1:0], conv_result_c);
 wire [31:0] quant_pack_next = put_byte(pack_word, quant_elem_sel_q, quant_result_q);
 wire [9:0] pipe_write_addr = (layer ? output_base : INTER_BASE) + sum_elem_idx_q[9:2];
 
@@ -224,17 +219,6 @@ function signed [ACC_W-1:0] mul_q;
     begin
         product = a * b;
         mul_q = {{(ACC_W-16){product[15]}}, product};
-    end
-endfunction
-
-function [9:0] row_offset_for;
-    input [1:0] idx;
-    begin
-        case (idx)
-            2'd0: row_offset_for = 10'd0;
-            2'd1: row_offset_for = {4'd0, in_size};
-            default: row_offset_for = {3'd0, in_size, 1'b0};
-        endcase
     end
 endfunction
 
@@ -356,17 +340,21 @@ function signed [7:0] quantize_q12;
     reg [5:0] fraction;
     reg round_up;
     reg signed [ACC_W-1:0] rounded;
+    reg signed [ACC_W-1:0] qmax;
+    reg signed [ACC_W-1:0] qmin;
     begin
+        qmax = {{(ACC_W-8){1'b0}}, 8'sh7f};
+        qmin = {{(ACC_W-8){1'b1}}, 8'sh80};
         shifted = value >>> 6;
         fraction = value[5:0];
         round_up = (fraction > 6'd32) ||
                    ((fraction == 6'd32) && (shifted[0] == 1'b1));
         rounded = shifted + {{(ACC_W-1){1'b0}}, round_up};
 
-        if (rounded > 20'sd127) begin
+        if (rounded > qmax) begin
             quantize_q12 = 8'sh7f;
         end
-        else if (rounded < -20'sd128) begin
+        else if (rounded < qmin) begin
             quantize_q12 = -8'sd128;
         end
         else begin
@@ -1106,50 +1094,7 @@ always @(posedge clk or negedge rstn) begin
             end
 
             S_CALC: begin
-                if (1'b0) begin
-                    if (word_done) begin
-                        pack_word <= 32'd0;
-                        if (last_elem) begin
-                            state <= S_FIN_REQ;
-                        end
-                        else begin
-                            read_addr_q <= next_read_addr;
-                            read_byte_sel_q <= next_read_sel;
-                            cross_word_q <= next_cross_word;
-                            elem_idx <= elem_idx + 10'd1;
-                            acc <= bias1_q12;
-                            if (row_last_col) begin
-                                col <= 6'd0;
-                                row <= row + 6'd1;
-                                row_base <= row_base + {4'd0, in_size};
-                            end
-                            else begin
-                                col <= col + 6'd1;
-                            end
-                            state <= S_ADDR_CALC;
-                        end
-                    end
-                    else begin
-                        pack_word <= pack_next;
-                        read_addr_q <= next_read_addr;
-                        read_byte_sel_q <= next_read_sel;
-                        cross_word_q <= next_cross_word;
-                        row_scan <= 2'd0;
-                        prod_valid_q <= 1'b0;
-                        elem_idx <= elem_idx + 10'd1;
-                        acc <= bias1_q12;
-                        if (row_last_col) begin
-                            col <= 6'd0;
-                            row <= row + 6'd1;
-                            row_base <= row_base + {4'd0, in_size};
-                        end
-                        else begin
-                            col <= col + 6'd1;
-                        end
-                        state <= S_ROW_CAP;
-                    end
-                end
-                else if (row_path_pixel) begin
+                if (row_path_pixel) begin
                     row_path_pixel <= 1'b0;
                     if (word_done) begin
                         pack_word <= 32'd0;
